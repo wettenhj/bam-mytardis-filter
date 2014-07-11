@@ -30,7 +30,7 @@ Then add the definition for this filter.
 POST_SAVE_FILTERS = [
    ("tardis.tardis_portal.filters.bamfilter.bamfilter.make_filter",
    ["BAM", "http://tardis.edu.au/schemas/bam/1",
-    "/path/to/samtools/samtool"]),
+    "/path/to/samtools/samtools"]),
    ]
 ```
 
