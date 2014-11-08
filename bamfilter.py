@@ -32,7 +32,7 @@
 """
 bamfilter.py
 
-.. moduleauthor:: Steve Androulakis <steve.androulakis@gmail.com>
+.. moduleauthor:: James Wettenhall <james.wettenhall@monash.edu>
 
 """
 from fractions import Fraction
@@ -43,9 +43,10 @@ from django.conf import settings
 from tardis.tardis_portal.models import Schema, DatafileParameterSet
 from tardis.tardis_portal.models import ParameterName, DatafileParameter
 import subprocess
-import tempfile
-import base64
+import traceback
 import os
+import tempfile
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class BamFilter(object):
     from BAM files.
 
     http://samtools.sourceforge.net/
-
+    http://samtools.github.io/hts-specs/SAMv1.pdf
     http://genome.sph.umich.edu/wiki/SAM
 
     If a white list is specified then it takes precedence and all
@@ -90,10 +91,24 @@ class BamFilter(object):
 
         schema = self.getSchema()
 
-        filepath = instance.get_absolute_filepath()
-
-        if not filepath.endswith('.bam'):
+        if not instance.filename.endswith('.bam'):
             return None
+
+        logger.info("Applying BAM filter for instance.filename = " + instance.filename)
+
+        tmpdir = tempfile.mkdtemp()
+
+        filepath = os.path.join(tmpdir, instance.filename)
+
+        with instance.file_object as f:
+            with open(filepath, 'wb') as g:
+                while True:
+                    chunk = f.read(1024)
+                    if not chunk:
+                        break
+                    g.write(chunk)
+
+        # filepath = instance.get_absolute_filepath()
 
         try:
 
@@ -101,39 +116,46 @@ class BamFilter(object):
 
             bin_infopath = os.path.basename(self.metadata_path)
             cd_infopath = os.path.dirname(self.metadata_path)
-            bam_information = self.textoutput(
-                cd_infopath, bin_infopath, filepath, '-nopix').split('\n')[11:]
-
+            cmd = "cd '%s'; ./'%s' view -H '%s'" %\
+                (cd_infopath, bin_infopath, filepath)
+            logger.info(cmd)
+            bam_information = self.exec_command(cmd).split('\n')
             if bam_information:
                 metadata_dump['bam_information'] = bam_information
+
+            shutil.rmtree(tmpdir)
 
             self.saveMetadata(instance, schema, metadata_dump)
 
         except Exception, e:
-            logger.debug(e)
+            logger.info(e)
             return None
 
     def saveMetadata(self, instance, schema, metadata):
-        """Save all the metadata to a Dataset_Files paramamter set.
+        """Save all the metadata to a DataFiles paramamter set.
         """
         parameters = self.getParameters(schema, metadata)
 
-        exclude_line = dict()
-
         if not parameters:
+            logger.info("No parameters, returning None from saveMetadata.")
             return None
 
         try:
             ps = DatafileParameterSet.objects.get(schema=schema,
-                                                  dataset_file=instance)
+                                                  datafile=instance)
+            logger.info("Parameter set already exists. Returning it.")
             return ps  # if already exists then just return it
         except DatafileParameterSet.DoesNotExist:
+            logger.info("Didn't find existing datafile parameter set for schema=%s,datafile=%s" % (str(schema),str(instance)))
             ps = DatafileParameterSet(schema=schema,
-                                      dataset_file=instance)
+                                      datafile=instance)
+            logger.info("Creating datafile parameter set for schema=%s,datafile=%s" % (str(schema),str(instance)))
             ps.save()
+            logger.info("Saved datafile parameter set for schema=%s,datafile=%s" % (str(schema),str(instance)))
 
-        for p in parameters:
-            print p.name
+        try:
+          for p in parameters:
+            logger.info(p.name)
             if p.name in metadata:
                 dfp = DatafileParameter(parameterset=ps,
                                         name=p)
@@ -142,12 +164,14 @@ class BamFilter(object):
                         dfp.numerical_value = metadata[p.name]
                         dfp.save()
                 else:
-                    print p.name
                     if isinstance(metadata[p.name], list):
                         for val in reversed(metadata[p.name]):
                             strip_val = val.strip()
                             if strip_val:
-                                if not strip_val in exclude_line:
+                                if strip_val.startswith("@HD") or \
+                                        strip_val.startswith("@SQ") or \
+                                        strip_val.startswith("@RG") or \
+                                        strip_val.startswith("@PG"):
                                     dfp = DatafileParameter(parameterset=ps,
                                                             name=p)
                                     dfp.string_value = strip_val
@@ -155,6 +179,8 @@ class BamFilter(object):
                     else:
                         dfp.string_value = metadata[p.name]
                         dfp.save()
+        except:
+            logger.info(traceback.format_exc())
 
         return ps
 
@@ -217,36 +243,23 @@ class BamFilter(object):
             schema.save()
             return schema
 
-    def base64_encode_file(self, filename):
-        """encode file from filename in base64
-        """
-        with open(filename, 'r') as fileobj:
-            read = fileobj.read()
-            encoded = base64.b64encode(read)
-            return encoded
-
     def exec_command(self, cmd):
         """execute command on shell
         """
         p = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             shell=True)
 
-        p.wait()
+        (stdout, stderr) = p.communicate()
 
-        result_str = p.stdout.read()
+        if stderr is not None and stderr.strip() != "":
+            logger.info(stderr)
+
+        result_str = stdout
 
         return result_str
-
-    def textoutput(self, cd, execfilename, inputfilename, args=""):
-        """execute command on shell with a stdout output
-        """
-        cmd = "cd '%s'; ./'%s' '%s' %s" %\
-            (cd, execfilename, inputfilename, args)
-        print cmd
-
-        return self.exec_command(cmd)
 
 
 def make_filter(name='', schema='', tagsToFind=[], tagsToExclude=[]):
